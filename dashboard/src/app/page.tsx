@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { motion } from 'framer-motion';
 
@@ -13,7 +13,6 @@ interface OsEvent {
 
 export default function Dashboard() {
   // === UI State Management ===
-  // These variables mirror the internal Rust Thread Control Blocks (TCBs) and scheduler
   const [activeThread, setActiveThread] = useState<string | null>(null);
   const [readyQueue, setReadyQueue] = useState<string[]>([]);
   const [blockedQueue, setBlockedQueue] = useState<string[]>([]);
@@ -21,10 +20,10 @@ export default function Dashboard() {
   
   // === Simulation Mode ===
   const [isSimulating, setIsSimulating] = useState(false);
+  const simStateRef = useRef({ active: null as string | null, ready: [] as string[], blocked: [] as string[] });
 
-  // Centralized dispatcher for state reduction
+  // Centralized dispatcher for state reduction (Used by actual WebSockets)
   const dispatchOsEvent = useCallback((event: OsEvent) => {
-    // Append every log line to keep an audit trail. Limit to 20 lines.
     setTerminalLogs(prev => {
       const newLogs = [...prev, event.text];
       return newLogs.slice(-20);
@@ -36,7 +35,6 @@ export default function Dashboard() {
       case 'CPU_ACTIVE':
       case 'MUTEX_ACQUIRED':
         setActiveThread(event.threadId);
-        // Ensure thread isn't stranded in waiting queues
         setReadyQueue(prev => prev.filter(id => id !== event.threadId));
         setBlockedQueue(prev => prev.filter(id => id !== event.threadId));
         break;
@@ -47,7 +45,6 @@ export default function Dashboard() {
           return prev;
         });
         setActiveThread(prev => (prev === event.threadId ? null : prev));
-        // Hardened State Fix: Clean up ready queue as well if it blocked
         setReadyQueue(prev => prev.filter(id => id !== event.threadId));
         break;
         
@@ -70,7 +67,6 @@ export default function Dashboard() {
       console.log('Connected to Node Bridge on port 3001!');
     });
 
-    // Attach our robust React state dispatcher
     socket.on('os_event', dispatchOsEvent);
 
     return () => {
@@ -78,50 +74,109 @@ export default function Dashboard() {
     };
   }, [dispatchOsEvent]);
 
-  // === Simulation Mode (Mock Data Generator) ===
+  // === Simulation Mode (High-Volume Load Tester) ===
+  // Because the POSIX backend is fundamentally unsupported natively on Windows, 
+  // this dynamic algorithm tests our React scheduler UI against heavy thread loads.
   useEffect(() => {
     if (!isSimulating) return;
 
-    let tick = 0;
+    // Initialization: Seed UI with 15 concurrent threads to demonstrate scalable layout & animations
+    simStateRef.current = {
+      active: null,
+      ready: Array.from({ length: 15 }, (_, i) => String(i + 1)),
+      blocked: []
+    };
+    
+    setActiveThread(null);
+    setBlockedQueue([]);
+    setReadyQueue([...simStateRef.current.ready]);
+    setTerminalLogs(['[Simulator] Initialized high-volume load test with 15 threads.']);
+
     const interval = setInterval(() => {
-      tick = (tick % 4) + 1;
-      
-      switch (tick) {
-        case 1:
-          dispatchOsEvent({ type: 'CPU_ACTIVE', threadId: '1', text: '[thread 1] running...' });
-          // Ensure mutual exclusivity even when manually seeding the ready queue
-          setReadyQueue(prev => Array.from(new Set([...prev, '2', '3'])).filter(id => id !== '1'));
-          break;
-        case 2:
-          dispatchOsEvent({ type: 'CPU_ACTIVE', threadId: '2', text: '[thread 1] yielding to [thread 2]' });
-          setReadyQueue(prev => Array.from(new Set([...prev, '1'])).filter(id => id !== '2' && id !== '3'));
-          break;
-        case 3:
-          dispatchOsEvent({ type: 'BLOCKED', threadId: '3', text: '[thread 3] requesting lock...' });
-          break;
-        case 4:
-          dispatchOsEvent({ type: 'EXITED', threadId: '2', text: '[thread 2] thread_exit()' });
-          dispatchOsEvent({ type: 'CPU_ACTIVE', threadId: '1', text: '[thread 1] resumed processing' });
-          break;
+      let state = simStateRef.current;
+      let newLogs: string[] = [];
+
+      // Phase A: Unblock (Simulating Mutex Release)
+      // Randomly pick 0 to 2 threads from blocked queue and push to back of ready queue
+      if (state.blocked.length > 0) {
+        const numToUnblock = Math.floor(Math.random() * 3);
+        const actualToUnblock = Math.min(numToUnblock, state.blocked.length);
+        for (let i = 0; i < actualToUnblock; i++) {
+          const idx = Math.floor(Math.random() * state.blocked.length);
+          const threadId = state.blocked[idx];
+          state.blocked.splice(idx, 1);
+          state.ready.push(threadId);
+          newLogs.push(`[thread ${threadId}] mutex unlocked -> ready_queue`);
+        }
       }
-    }, 1500);
+
+      // Phase B: Context Switch (Simulating Yields, Blocks, and Exits)
+      let needsNewActive = false;
+      if (state.active) {
+        const r = Math.random();
+        const currentActive = state.active;
+        if (r < 0.6) {
+          // 60% Chance: Thread Yields (Round Robin)
+          state.active = null;
+          state.ready.push(currentActive);
+          needsNewActive = true;
+          newLogs.push(`[thread ${currentActive}] thread_yield() -> ready_queue`);
+        } else if (r < 0.9) {
+          // 30% Chance: Thread Blocks (Mutex Lock Wait)
+          state.active = null;
+          state.blocked.push(currentActive);
+          needsNewActive = true;
+          newLogs.push(`[thread ${currentActive}] mutex_lock() stalled -> blocked_queue`);
+        } else {
+          // 10% Chance: Thread Exits (Terminates)
+          state.active = null;
+          needsNewActive = true;
+          newLogs.push(`[thread ${currentActive}] thread_exit() -> terminated`);
+        }
+      } else {
+        needsNewActive = true; // CPU is idle, grab next thread
+      }
+
+      // If CPU needs work, take the first thread from Ready Queue FIFO style
+      if (needsNewActive && state.ready.length > 0) {
+        const nextActive = state.ready.shift()!;
+        state.active = nextActive;
+        newLogs.push(`[thread ${nextActive}] swapped into CPU...`);
+      } else if (needsNewActive && state.ready.length === 0 && state.blocked.length === 0) {
+        // Simulation exhausted
+        newLogs.push(`[Simulator] All 15 threads exited. Halting load test.`);
+        setIsSimulating(false);
+      }
+
+      // Flush our rigorously mutually-exclusive internal simulation ref to the actual React UI States
+      setActiveThread(state.active);
+      setReadyQueue([...state.ready]);
+      setBlockedQueue([...state.blocked]);
+      if (newLogs.length > 0) {
+        setTerminalLogs(prev => {
+          const nextLogs = [...prev, ...newLogs];
+          return nextLogs.slice(-20);
+        });
+      }
+
+    }, 800);
 
     return () => clearInterval(interval);
-  }, [isSimulating, dispatchOsEvent]);
+  }, [isSimulating]);
 
   return (
-    <div className="bg-neutral-950 text-neutral-300 min-h-screen p-8 font-mono overflow-x-hidden">
-      <div className="flex justify-between items-center mb-8 border-b border-neutral-800 pb-4">
-        <h1 className="text-4xl font-bold text-neutral-100">uthreads Visualizer</h1>
+    <div className="bg-[#0B0F19] text-slate-300 min-h-screen p-8 font-sans overflow-x-hidden">
+      <div className="flex flex-col md:flex-row justify-between items-center mb-8 border-b border-slate-800/50 pb-6">
+        <h1 className="text-4xl font-extrabold text-slate-100 tracking-tight mb-4 md:mb-0">uthreads<span className="text-slate-500 font-light ml-2">Visualizer</span></h1>
         <button 
           onClick={() => setIsSimulating(!isSimulating)}
-          className={`border px-3 py-1 text-xs font-bold uppercase tracking-wider rounded transition-colors ${
+          className={`flex items-center gap-2 px-5 py-2.5 text-sm font-semibold tracking-wide rounded-lg transition-all duration-300 ${
             isSimulating 
-              ? 'border-red-500 text-red-500 hover:bg-red-950/50' 
-              : 'border-emerald-500 text-emerald-500 hover:bg-emerald-950/50'
+              ? 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30' 
+              : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.1)]'
           }`}
         >
-          {isSimulating ? 'Stop Simulation' : 'Run Simulation'}
+          {isSimulating ? '■ STOP SIMULATION' : '▶ START SIMULATION'}
         </button>
       </div>
       
@@ -129,66 +184,70 @@ export default function Dashboard() {
         
         {/* === CPU Execution Zone === */}
         {/* We use framer-motion's 'layout' prop here and below so that threads glide cleanly between queues visually upon state change. */}
-        <div className={`flex flex-col justify-center items-center p-8 rounded-xl border-2 transition-all duration-300 w-full lg:w-1/3 ${activeThread ? 'border-emerald-500 bg-emerald-950/20 shadow-[0_0_15px_rgba(16,185,129,0.3)]' : 'border-neutral-800 bg-neutral-900 shadow-inner'}`}>
-          <h2 className={`text-xl font-semibold mb-4 tracking-wider ${activeThread ? 'text-emerald-400' : 'text-neutral-500'}`}>CPU EXECUTION</h2>
-          <div className="h-24 flex items-center justify-center">
+        <div className={`flex flex-col justify-center items-center p-8 rounded-2xl transition-all duration-500 w-full lg:w-1/3 backdrop-blur-md ${activeThread ? 'border border-emerald-500/50 bg-emerald-950/20 shadow-[0_0_30px_rgba(16,185,129,0.15)]' : 'border border-slate-800/50 bg-slate-900/50 shadow-sm'}`}>
+          <h2 className={`text-sm font-bold uppercase tracking-widest mb-6 ${activeThread ? 'text-emerald-400/80' : 'text-slate-500'}`}>CPU EXECUTION</h2>
+          <div className="h-28 flex items-center justify-center">
             {activeThread ? (
               <motion.div 
                 layout
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                key={`active-${activeThread}`}
-                className="text-6xl font-black text-emerald-300 drop-shadow-md"
+                initial={{ opacity: 0, scale: 0.8, y: 10 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                whileHover={{ scale: 1.05 }}
+                key={`t-${activeThread}`}
+                className="w-24 h-24 flex items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500/20 to-emerald-900/40 border border-emerald-500/40 text-5xl font-black text-emerald-300 shadow-[inset_0_0_15px_rgba(16,185,129,0.2)]"
               >
                 T{activeThread}
               </motion.div>
             ) : (
-              <div className="text-6xl font-black text-neutral-700">IDLE</div>
+              <div className="text-5xl font-black text-slate-800/80">IDLE</div>
             )}
           </div>
         </div>
 
         <div className="flex flex-col gap-6 w-full lg:w-2/3">
           {/* === Ready Queue Zone === */}
-          <div className="p-6 bg-neutral-900 border border-neutral-800 rounded-xl shadow-md">
-            <h2 className="text-lg font-semibold text-blue-400 mb-4 uppercase tracking-widest border-b border-neutral-800 pb-2">Ready Queue</h2>
-            <div className="flex flex-row overflow-x-auto gap-4 py-2 min-h-[5.5rem]">
+          {/* Layout modified for High-Volume wrapping using flex-wrap */}
+          <div className="p-6 bg-slate-900/50 backdrop-blur-md border border-slate-800/50 rounded-2xl shadow-sm min-h-[13rem] flex flex-col">
+            <h2 className="text-sm font-bold text-slate-400 mb-4 uppercase tracking-widest border-b border-slate-800/50 pb-3">Ready Queue</h2>
+            <div className="flex flex-wrap gap-3 py-2 flex-1 items-start content-start">
               {readyQueue.length > 0 ? (
                 readyQueue.map((id) => (
                   <motion.div 
                     layout
                     initial={{ opacity: 0, scale: 0.8 }}
                     animate={{ opacity: 1, scale: 1 }}
+                    whileHover={{ scale: 1.05 }}
                     key={`t-${id}`} 
-                    className="shrink-0 w-20 h-20 flex items-center justify-center bg-blue-950/40 border border-blue-800 rounded-lg text-blue-300 text-2xl font-bold shadow-sm"
+                    className="w-14 h-14 flex items-center justify-center bg-slate-800 border border-slate-700/80 rounded-xl text-slate-200 text-lg font-bold shadow-sm"
                   >
                     T{id}
                   </motion.div>
                 ))
               ) : (
-                <div className="text-neutral-600 italic py-4">Queue is empty</div>
+                <div className="text-slate-500 text-sm italic py-4 w-full text-center">Queue is empty.</div>
               )}
             </div>
           </div>
 
           {/* === Blocked Queue Zone === */}
-          <div className="p-6 bg-neutral-900 border border-red-900 rounded-xl shadow-md bg-red-950/10">
-            <h2 className="text-lg font-semibold text-red-500 mb-4 uppercase tracking-widest border-b border-red-950 pb-2">Blocked (Mutex Wait)</h2>
-            <div className="flex flex-row overflow-x-auto gap-4 py-2 min-h-[5.5rem]">
+          <div className="p-6 bg-slate-900/50 backdrop-blur-md border border-slate-800/50 rounded-2xl shadow-sm min-h-[13rem] flex flex-col">
+            <h2 className="text-sm font-bold text-slate-400 mb-4 uppercase tracking-widest border-b border-slate-800/50 pb-3">Blocked (Mutex Wait)</h2>
+            <div className="flex flex-wrap gap-3 py-2 flex-1 items-start content-start">
               {blockedQueue.length > 0 ? (
                 blockedQueue.map((id) => (
                   <motion.div 
                     layout
                     initial={{ opacity: 0, scale: 0.8 }}
                     animate={{ opacity: 1, scale: 1 }}
+                    whileHover={{ scale: 1.05 }}
                     key={`t-${id}`} 
-                    className="shrink-0 w-20 h-20 flex items-center justify-center bg-red-950/40 border border-red-900 rounded-lg text-red-400 text-2xl font-bold shadow-sm opacity-80"
+                    className="w-14 h-14 flex items-center justify-center bg-rose-950/40 border border-rose-900/50 rounded-xl text-rose-300 text-lg font-bold shadow-sm"
                   >
                     T{id}
                   </motion.div>
                 ))
               ) : (
-                <div className="text-neutral-600 italic py-4">No blocked threads</div>
+                <div className="text-slate-500 text-sm italic py-4 w-full text-center">No blocked threads.</div>
               )}
             </div>
           </div>
@@ -196,17 +255,17 @@ export default function Dashboard() {
       </div>
 
       {/* === Stdout Log Zone === */}
-      <div className="p-4 bg-black border border-neutral-800 rounded-xl overflow-hidden h-64 flex flex-col shadow-inner">
-        <h2 className="text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-800 pb-2 mb-3 shrink-0">
+      <div className="p-5 bg-black/40 backdrop-blur-sm border border-slate-800/50 rounded-2xl overflow-hidden h-72 flex flex-col shadow-inner">
+        <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500 border-b border-slate-800/50 pb-3 mb-3 shrink-0">
           Terminal Stream
         </h2>
-        <div className="space-y-1 text-sm text-green-400 flex-1 overflow-y-auto font-mono pb-2">
+        <div className="space-y-1.5 text-[13px] text-emerald-400/90 flex-1 overflow-y-auto font-mono pb-2 pr-2">
           {terminalLogs.map((log, index) => (
             <div key={index} className="whitespace-pre">
-              <span className="text-neutral-600 mr-2">{'>'}</span>{log}
+              <span className="text-slate-600 mr-3">{'>'}</span>{log}
             </div>
           ))}
-          {terminalLogs.length === 0 && <div className="text-neutral-600 italic">Listening on ws://localhost:3001...</div>}
+          {terminalLogs.length === 0 && <div className="text-slate-600 italic">Listening on ws://localhost:3001...</div>}
         </div>
       </div>
     </div>

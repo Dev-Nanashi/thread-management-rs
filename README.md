@@ -138,11 +138,8 @@ The Next.js app maintains local React state variables (`activeThread`, `readyQue
 **Phase 4: Frontend UI**
 The Dashboard now features a highly polished, responsive dark-mode UI powered by Tailwind CSS. Visual segregation separates the **CPU Execution** zone (which glows when active), a horizontal flex-based **Ready Queue**, a highlighted red **Blocked Queue** for threads halted on cooperative mutex execution, and a scrolling live **Terminal Stream** directly mirroring the Rust backend.
 
-**Phase 5: Simulation Mode**
-A frontend-only mock data generator was integrated to simulate queue state changes. Because the POSIX backend is fundamentally unsupported natively on Windows, this simulation toggle enables accurate, robust testing of the UI state changes (CPU scheduling, yielding, locking) without relying on the Node bridge.
-
-**Phase 6: Polish & Animation**
-Integrated `framer-motion` to provide smooth, kinematic layout animations. As POSIX context switches occur, threads physically glide across the screen between the Active CPU, Ready, and Blocked queues. The underlying simulation state logic was heavily hardened to strictly enforce mutual exclusivity across the queues.
+**Phase 5 & 6: Simulation & High-Volume Animation Mode**
+A frontend-only mock data generator was integrated to physically simulate the internal logic of the POSIX backend. Recently upgraded to a randomized, algorithmic load tester supporting 15+ concurrent threads. Utilizing `framer-motion`, the dynamic UI renders smooth, cinematic translations highlighting exact threading constraints (Yielding, Wait-Lists, Context Switching, Mutual Exclusivity) ensuring robust testing capability entirely on native Windows.
 
 **How to run the UI (Development):**
 
