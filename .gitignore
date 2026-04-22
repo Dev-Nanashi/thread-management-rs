@@ -1,1 +1,6 @@
 /target
+# Node / UI Dashboard
+node_modules/
+.next/
+# Node Bridge
+ui-bridge/node_modules/

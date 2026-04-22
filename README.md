@@ -118,3 +118,40 @@ examples/
 3. `thread_yield` / `thread_join` / `mutex_lock` call into the scheduler, which uses `swapcontext` to switch to the next ready thread.
 4. Mutexes are cooperative — a blocked thread is marked `Blocked` and removed from the run queue until the current owner calls `mutex_unlock`.
 
+---
+
+## Web UI Dashboard (WIP)
+
+We are currently building a real-time visualization dashboard to monitor threads and scheduling events.
+
+**Architecture:**
+- **Rust Core**: Unmodified, produces standard output logs.
+- **Node.js Bridge (`ui-bridge/`)**: Spawns the Rust process, parses its output, and broadcasts state via WebSocket.
+- **Next.js Dashboard (`dashboard/`)**: The frontend UI for visualization.
+
+**Phase 2: Node.js Data Bridge**
+The `ui-bridge/bridge.js` acts as the middleware. It spawns the Rust binary (`cargo run --example showcase`), captures `stdout`, parses the terminal strings via regex into structured JSON, and broadcasts them over Socket.io on port 3001.
+
+**Phase 3: State Management**
+The Next.js app maintains local React state variables (`activeThread`, `readyQueue`, `blockedQueue`, `terminalLogs`) that mirror the internal Rust POSIX ucontext scheduler. It listens to the `os_event` Socket.io channel on `http://localhost:3001`, parsing and reducing incoming structured state updates directly into the UI state in real-time.
+
+**Phase 4: Frontend UI**
+The Dashboard now features a highly polished, responsive dark-mode UI powered by Tailwind CSS. Visual segregation separates the **CPU Execution** zone (which glows when active), a horizontal flex-based **Ready Queue**, a highlighted red **Blocked Queue** for threads halted on cooperative mutex execution, and a scrolling live **Terminal Stream** directly mirroring the Rust backend.
+
+**Phase 5 & 6: Simulation & High-Volume Animation Mode**
+A frontend-only mock data generator was integrated to physically simulate the internal logic of the POSIX backend. Recently upgraded to a randomized, algorithmic load tester supporting 15+ concurrent threads. Utilizing `framer-motion`, the dynamic UI renders smooth, cinematic translations highlighting exact threading constraints (Yielding, Wait-Lists, Context Switching, Mutual Exclusivity) ensuring robust testing capability entirely on native Windows.
+
+**How to run the UI (Development):**
+
+1. **Start the Node.js Bridge:**
+   ```bash
+   cd ui-bridge
+   node bridge.js
+   ```
+
+2. **Start the Next.js Dashboard:**
+   ```bash
+   cd dashboard
+   npm run dev
+   ```
+
